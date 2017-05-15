@@ -17,6 +17,7 @@ _logger = logging.getLogger(__name__)
 
 try:
     import redis
+    from redis.sentinel import Sentinel
 except ImportError:
     redis = None  # noqa
     _logger.debug("Cannot 'import redis'.")
@@ -26,6 +27,13 @@ def is_true(strval):
     return bool(strtobool(strval or '0'.lower()))
 
 
+sentinel_host = os.environ.get('ODOO_SESSION_REDIS_SENTINEL_HOST')
+sentinel_master_name = os.environ.get(
+    'ODOO_SESSION_REDIS_SENTINEL_MASTER_NAME'
+)
+sentinel_port = int(
+    os.environ.get('ODOO_SESSION_REDIS_SENTINEL_PORT') or 26379
+)
 host = os.environ.get('ODOO_SESSION_REDIS_HOST') or 'localhost'
 port = int(os.environ.get('ODOO_SESSION_REDIS_PORT') or 6379)
 prefix = os.environ.get('ODOO_SESSION_REDIS_PREFIX')
@@ -35,7 +43,13 @@ expiration = os.environ.get('ODOO_SESSION_REDIS_EXPIRATION')
 
 @lazy_property
 def session_store(self):
-    redis_client = redis.Redis(host=host, port=port, password=password)
+    if sentinel_host:
+        assert sentinel_master_name
+        sentinel = Sentinel([(sentinel_host, sentinel_port)],
+                            password=password)
+        redis_client = sentinel.master_for(sentinel_master_name)
+    else:
+        redis_client = redis.Redis(host=host, port=port, password=password)
     return RedisSessionStore(redis=redis_client, prefix=prefix,
                              expiration=expiration,
                              session_class=http.OpenERPSession)
@@ -60,8 +74,14 @@ def purge_fs_sessions(path):
 
 
 if is_true(os.environ.get('ODOO_SESSION_REDIS')):
-    _logger.debug("HTTP sessions stored in Redis %s:%s with prefix '%s'",
-                  host, port, prefix or '')
+    if sentinel_host:
+        _logger.debug("HTTP sessions stored in Redis with prefix '%s'. "
+                      "Using Sentinel on %s:%s",
+                      sentinel_host, sentinel_port, prefix or '')
+    else:
+        _logger.debug("HTTP sessions stored in Redis with prefix '%s' on "
+                      "%s:%s", host, port, prefix or '')
+
     http.Root.session_store = session_store
     http.session_gc = session_gc
     # clean the existing sessions on the file system
